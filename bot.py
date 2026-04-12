@@ -232,6 +232,193 @@ class CountryView(discord.ui.View):
             item.disabled = True
 
 
+# ── 수정용 모달: 닉네임 + 플레이타임 (현재값 pre-fill) ──────────
+
+
+class EditInfoModal(discord.ui.Modal, title="정보 수정"):
+    def __init__(self, target_id: str, info: dict):
+        super().__init__()
+        self.target_id = target_id
+        self.info = info
+
+        current_pt = info.get("플레이타임", "")
+        if current_pt == "미입력":
+            current_pt = ""
+
+        self.닉네임_input = discord.ui.TextInput(
+            label="인게임 닉네임",
+            default=info.get("인게임닉네임", ""),
+            required=True,
+            max_length=64,
+        )
+        self.플레이타임_input = discord.ui.TextInput(
+            label="플레이타임 (선택)",
+            default=current_pt,
+            required=False,
+            max_length=50,
+        )
+        self.add_item(self.닉네임_input)
+        self.add_item(self.플레이타임_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        members = load_members()
+        if self.target_id not in members:
+            await interaction.response.send_message(
+                "❌ 해당 유저가 목록에 없습니다.", ephemeral=True
+            )
+            return
+
+        old_nick = members[self.target_id].get("인게임닉네임", "미입력")
+        old_pt = members[self.target_id].get("플레이타임", "미입력")
+
+        members[self.target_id]["인게임닉네임"] = self.닉네임_input.value
+        members[self.target_id]["플레이타임"] = (
+            self.플레이타임_input.value if self.플레이타임_input.value else "미입력"
+        )
+        save_members(members)
+
+        new_nick = members[self.target_id]["인게임닉네임"]
+        new_pt = members[self.target_id]["플레이타임"]
+        name = members[self.target_id]["display_name"]
+        print(f"[수정] {name} ({self.target_id}) 닉네임={old_nick}→{new_nick} 플레이타임={old_pt}→{new_pt}")
+
+        await interaction.response.send_message(
+            f"✅ **{name}** 님의 정보가 수정되었습니다!\n"
+            f"> 🎮 닉네임: {old_nick} → **{new_nick}**\n"
+            f"> ⏱️ 플레이타임: {old_pt} → **{new_pt}**",
+            ephemeral=True,
+        )
+
+
+# ── 수정용 국가 드롭다운 ──────────────────────────────────────
+
+
+class EditCountrySelect(discord.ui.Select):
+    def __init__(self, target_id: str, info: dict, countries: list[str]):
+        self.target_id = target_id
+        self.info = info
+        current = info.get("국가", "")
+        options = [
+            discord.SelectOption(
+                label=c,
+                description="현재 선택된 국가" if c == current else None,
+            )
+            for c in countries
+        ]
+        super().__init__(
+            placeholder="새 국가를 선택하세요", options=options, min_values=1, max_values=1
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        new_country = self.values[0]
+        old_country = self.info.get("국가", "미입력")
+        members = load_members()
+
+        if self.target_id not in members:
+            await interaction.response.edit_message(
+                content="❌ 해당 유저가 목록에 없습니다.", view=None
+            )
+            return
+
+        if new_country != old_country:
+            taken = {
+                inf.get("국가")
+                for uid, inf in members.items()
+                if uid != self.target_id
+            }
+            if new_country in taken:
+                await interaction.response.send_message(
+                    f"❌ **{new_country}** 는 이미 다른 분이 선택하셨습니다.", ephemeral=True
+                )
+                return
+
+        members[self.target_id]["국가"] = new_country
+        save_members(members)
+        name = members[self.target_id]["display_name"]
+        print(f"[수정] {name} ({self.target_id}) 국가={old_country}→{new_country}")
+
+        await interaction.response.edit_message(
+            content=f"✅ **{name}** 님의 국가가 **{old_country}** → **{new_country}** 로 변경되었습니다!",
+            view=None,
+        )
+
+
+class EditCountryView(discord.ui.View):
+    def __init__(self, target_id: str, info: dict, available: list[str], page: int = 0):
+        super().__init__(timeout=60)
+        self.target_id = target_id
+        self.info = info
+        self.available = available
+        self.page = page
+        self._build(page)
+
+    def _build(self, page: int):
+        self.clear_items()
+        start = page * PAGE_SIZE
+        end = start + PAGE_SIZE
+        chunk = self.available[start:end]
+        self.add_item(EditCountrySelect(self.target_id, self.info, chunk))
+
+        if page > 0:
+            prev_btn = discord.ui.Button(label="◀ 이전", style=discord.ButtonStyle.secondary)
+
+            async def prev_cb(interaction: discord.Interaction):
+                new_view = EditCountryView(self.target_id, self.info, self.available, page - 1)
+                await interaction.response.edit_message(content=new_view._header(), view=new_view)
+
+            prev_btn.callback = prev_cb
+            self.add_item(prev_btn)
+
+        if end < len(self.available):
+            next_btn = discord.ui.Button(label="다음 ▶", style=discord.ButtonStyle.secondary)
+
+            async def next_cb(interaction: discord.Interaction):
+                new_view = EditCountryView(self.target_id, self.info, self.available, page + 1)
+                await interaction.response.edit_message(content=new_view._header(), view=new_view)
+
+            next_btn.callback = next_cb
+            self.add_item(next_btn)
+
+    def _header(self) -> str:
+        current = self.info.get("국가", "미입력")
+        total = len(self.available)
+        start = self.page * PAGE_SIZE + 1
+        end = min((self.page + 1) * PAGE_SIZE, total)
+        return (
+            f"🌍 **국가 변경** (현재: **{current}**) — {total}개 중 {start}~{end}번\n"
+            "새로운 국가를 선택하세요:"
+        )
+
+
+# ── 수정 메뉴 View ────────────────────────────────────────────
+
+
+class EditMenuView(discord.ui.View):
+    def __init__(self, target_id: str, info: dict):
+        super().__init__(timeout=60)
+        self.target_id = target_id
+        self.info = info
+
+    @discord.ui.button(label="🌍 국가 변경", style=discord.ButtonStyle.primary)
+    async def change_country(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        current_country = self.info.get("국가")
+        available = get_available_countries()
+        # 현재 국가는 이미 본인이 갖고 있으므로 선택 가능 목록 앞에 추가
+        if current_country and current_country not in available:
+            available = [current_country] + available
+
+        view = EditCountryView(self.target_id, self.info, available)
+        await interaction.response.edit_message(content=view._header(), view=view)
+
+    @discord.ui.button(label="🎮 닉네임/플레이타임 변경", style=discord.ButtonStyle.primary)
+    async def change_info(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await interaction.response.send_modal(EditInfoModal(self.target_id, self.info))
+
+
 # ── 봇 이벤트 ─────────────────────────────────────────────────
 
 
@@ -426,6 +613,41 @@ async def 일괄제거(interaction: discord.Interaction):
 
     await interaction.response.send_message(
         f"🗑️ 총 **{count}명** 의 멤버가 목록에서 제거되었습니다. (모든 국가 반환됨)",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="수정", description="참여 정보를 수정합니다. 관리자는 유저ID를 지정할 수 있습니다.")
+@app_commands.describe(유저id="수정할 유저의 ID (관리자 전용, 생략 시 본인)")
+async def 수정(interaction: discord.Interaction, 유저id: str = None):
+    members = load_members()
+    is_admin = interaction.user.guild_permissions.administrator
+
+    if 유저id:
+        if not is_admin:
+            await interaction.response.send_message(
+                "❌ 다른 유저의 정보는 관리자만 수정할 수 있습니다.", ephemeral=True
+            )
+            return
+        target_id = 유저id
+    else:
+        target_id = str(interaction.user.id)
+
+    if target_id not in members:
+        await interaction.response.send_message(
+            "⚠️ 해당 유저는 참여 목록에 없습니다.", ephemeral=True
+        )
+        return
+
+    info = members[target_id]
+    view = EditMenuView(target_id, info)
+    await interaction.response.send_message(
+        f"✏️ **{info['display_name']}** 님의 현재 정보\n"
+        f"> 🌍 국가: {info.get('국가', '미입력')}\n"
+        f"> 🎮 닉네임: {info.get('인게임닉네임', '미입력')}\n"
+        f"> ⏱️ 플레이타임: {info.get('플레이타임', '미입력')}\n\n"
+        "수정할 항목을 선택하세요:",
+        view=view,
         ephemeral=True,
     )
 
