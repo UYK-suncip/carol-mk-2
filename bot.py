@@ -145,8 +145,51 @@ async def 역할일괄지급(interaction: discord.Interaction):
     )
 
 
+@bot.tree.command(name="제거", description="특정 유저를 목록에서 제거합니다. (관리자 전용)")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(유저id="제거할 유저의 ID")
+async def 제거(interaction: discord.Interaction, 유저id: str):
+    members = load_members()
+
+    if 유저id not in members:
+        await interaction.response.send_message(
+            f"⚠️ ID `{유저id}` 는 목록에 없습니다.", ephemeral=True
+        )
+        return
+
+    info = members.pop(유저id)
+    save_members(members)
+    print(f"[제거] {info['display_name']} ({유저id}) 목록에서 제거됨")
+
+    await interaction.response.send_message(
+        f"🗑️ **{info['display_name']}** (`{유저id}`) 님이 목록에서 제거되었습니다.",
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name="일괄제거", description="목록의 모든 멤버를 제거합니다. (관리자 전용)")
+@app_commands.checks.has_permissions(administrator=True)
+async def 일괄제거(interaction: discord.Interaction):
+    members = load_members()
+
+    if not members:
+        await interaction.response.send_message("📋 목록이 이미 비어 있습니다.", ephemeral=True)
+        return
+
+    count = len(members)
+    save_members({})
+    print(f"[일괄제거] 총 {count}명 목록에서 제거됨")
+
+    await interaction.response.send_message(
+        f"🗑️ 총 **{count}명** 의 멤버가 목록에서 제거되었습니다.",
+        ephemeral=True
+    )
+
+
 @목록.error
 @역할일괄지급.error
+@제거.error
+@일괄제거.error
 async def permission_error(interaction: discord.Interaction, error):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message("❌ 관리자만 사용할 수 있는 명령어입니다.", ephemeral=True)
