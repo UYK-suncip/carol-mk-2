@@ -10,12 +10,15 @@ GUILD_ID = int(os.environ.get("DISCORD_GUILD_ID", "0"))
 ROLE_ID = int(os.environ.get("ROLE_ID", "0"))
 
 DATA_FILE = "members.json"
+COUNTRIES_FILE = "countries.json"
 
 intents = discord.Intents.default()
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+
+# ── 데이터 로드/저장 ──────────────────────────────────────────
 
 def load_members():
     if not os.path.exists(DATA_FILE):
@@ -29,25 +32,39 @@ def save_members(data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-class 참여Modal(discord.ui.Modal, title="참여 정보 입력"):
-    국가 = discord.ui.TextInput(
-        label="국가",
-        placeholder="예) 대한민국, Korea, Japan ...",
-        required=True,
-        max_length=50
-    )
+def load_countries():
+    if not os.path.exists(COUNTRIES_FILE):
+        return []
+    with open(COUNTRIES_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def get_available_countries():
+    all_countries = load_countries()
+    members = load_members()
+    taken = {info.get("국가") for info in members.values()}
+    return [c for c in all_countries if c not in taken]
+
+
+# ── 모달: 닉네임 + 플레이타임 ────────────────────────────────
+
+class InfoModal(discord.ui.Modal, title="참여 정보 입력"):
     인게임닉네임 = discord.ui.TextInput(
         label="인게임 닉네임",
         placeholder="게임 내에서 사용하는 닉네임을 입력하세요",
         required=True,
-        max_length=64
+        max_length=64,
     )
     플레이타임 = discord.ui.TextInput(
         label="플레이타임 (선택)",
         placeholder="예) 500시간, 1000h ...",
         required=False,
-        max_length=50
+        max_length=50,
     )
+
+    def __init__(self, selected_country: str):
+        super().__init__()
+        self.selected_country = selected_country
 
     async def on_submit(self, interaction: discord.Interaction):
         user = interaction.user
@@ -59,14 +76,23 @@ class 참여Modal(discord.ui.Modal, title="참여 정보 입력"):
             )
             return
 
+        # 국가 중복 재확인 (동시 접근 방지)
+        taken = {info.get("국가") for info in members.values()}
+        if self.selected_country in taken:
+            await interaction.response.send_message(
+                f"❌ **{self.selected_country}** 는 방금 다른 분이 선택하셨습니다. 다시 시도해주세요.",
+                ephemeral=True,
+            )
+            return
+
         members[str(user.id)] = {
             "id": user.id,
             "username": user.name,
             "display_name": user.display_name,
-            "국가": self.국가.value,
+            "국가": self.selected_country,
             "인게임닉네임": self.인게임닉네임.value,
             "플레이타임": self.플레이타임.value if self.플레이타임.value else "미입력",
-            "joined_at": datetime.now().isoformat()
+            "joined_at": datetime.now().isoformat(),
         }
         save_members(members)
 
@@ -83,21 +109,85 @@ class 참여Modal(discord.ui.Modal, title="참여 정보 입력"):
             await user.add_roles(role, reason="슬래시 명령어 /참여 사용")
             await interaction.response.send_message(
                 f"✅ **{user.display_name}**님, 참여 완료! **{role.name}** 역할이 지급되었습니다!\n"
-                f"> 🌍 국가: {self.국가.value}\n"
+                f"> 🌍 국가: {self.selected_country}\n"
                 f"> 🎮 닉네임: {self.인게임닉네임.value}\n"
                 f"> ⏱️ 플레이타임: {self.플레이타임.value or '미입력'}",
-                ephemeral=True
+                ephemeral=True,
             )
-            print(f"[역할 지급] {user.name} ({user.id}) 닉네임={self.인게임닉네임.value} 국가={self.국가.value}")
+            print(
+                f"[역할 지급] {user.name} ({user.id}) 국가={self.selected_country} 닉네임={self.인게임닉네임.value}"
+            )
         except discord.Forbidden:
             await interaction.response.send_message(
                 "❌ 봇에게 역할 지급 권한이 없습니다. 관리자에게 문의해주세요.", ephemeral=True
             )
         except Exception as e:
-            await interaction.response.send_message(
-                f"❌ 오류 발생: {e}", ephemeral=True
-            )
+            await interaction.response.send_message(f"❌ 오류 발생: {e}", ephemeral=True)
 
+
+# ── 드롭다운: 국가 선택 (페이지 지원) ────────────────────────
+
+PAGE_SIZE = 25
+
+class CountrySelect(discord.ui.Select):
+    def __init__(self, countries: list[str]):
+        options = [discord.SelectOption(label=c) for c in countries]
+        super().__init__(placeholder="국가를 선택하세요", options=options, min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        selected = self.values[0]
+        await interaction.response.send_modal(InfoModal(selected))
+
+
+class CountryView(discord.ui.View):
+    def __init__(self, available: list[str], page: int = 0):
+        super().__init__(timeout=60)
+        self.available = available
+        self.page = page
+        self._build(page)
+
+    def _build(self, page: int):
+        self.clear_items()
+        start = page * PAGE_SIZE
+        end = start + PAGE_SIZE
+        chunk = self.available[start:end]
+        self.add_item(CountrySelect(chunk))
+
+        if page > 0:
+            prev_btn = discord.ui.Button(label="◀ 이전", style=discord.ButtonStyle.secondary)
+            async def prev_cb(interaction: discord.Interaction):
+                new_view = CountryView(self.available, page - 1)
+                await interaction.response.edit_message(
+                    content=new_view._header(), view=new_view
+                )
+            prev_btn.callback = prev_cb
+            self.add_item(prev_btn)
+
+        if end < len(self.available):
+            next_btn = discord.ui.Button(label="다음 ▶", style=discord.ButtonStyle.secondary)
+            async def next_cb(interaction: discord.Interaction):
+                new_view = CountryView(self.available, page + 1)
+                await interaction.response.edit_message(
+                    content=new_view._header(), view=new_view
+                )
+            next_btn.callback = next_cb
+            self.add_item(next_btn)
+
+    def _header(self) -> str:
+        total = len(self.available)
+        start = self.page * PAGE_SIZE + 1
+        end = min((self.page + 1) * PAGE_SIZE, total)
+        return (
+            f"🌍 **선택 가능한 국가** ({total}개 남음) — {start}~{end}번\n"
+            "아래 드롭다운에서 원하는 국가를 선택하면 추가 정보 입력창이 열립니다."
+        )
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+# ── 봇 이벤트 ─────────────────────────────────────────────────
 
 @bot.event
 async def on_ready():
@@ -111,6 +201,8 @@ async def on_ready():
         print(f"명령어 동기화 오류: {e}")
 
 
+# ── 슬래시 명령어 ─────────────────────────────────────────────
+
 @bot.tree.command(name="참여", description="서버에 참여하고 역할을 받습니다.")
 async def 참여(interaction: discord.Interaction):
     members = load_members()
@@ -119,7 +211,47 @@ async def 참여(interaction: discord.Interaction):
             f"⚠️ **{interaction.user.display_name}**님은 이미 참여하셨습니다!", ephemeral=True
         )
         return
-    await interaction.response.send_modal(참여Modal())
+
+    available = get_available_countries()
+    if not available:
+        await interaction.response.send_message(
+            "❌ 현재 선택 가능한 국가가 없습니다. 관리자에게 문의해주세요.", ephemeral=True
+        )
+        return
+
+    view = CountryView(available)
+    await interaction.response.send_message(view._header(), view=view, ephemeral=True)
+
+
+@bot.tree.command(name="남은국가", description="아직 선택되지 않은 국가 목록을 보여줍니다.")
+async def 남은국가(interaction: discord.Interaction):
+    all_countries = load_countries()
+    available = get_available_countries()
+    taken_count = len(all_countries) - len(available)
+
+    if not all_countries:
+        await interaction.response.send_message(
+            "❌ 국가 목록 파일이 비어 있습니다.", ephemeral=True
+        )
+        return
+
+    if not available:
+        await interaction.response.send_message(
+            f"🌍 모든 국가가 선택되었습니다! (총 {len(all_countries)}개)", ephemeral=True
+        )
+        return
+
+    lines = [
+        f"🌍 **선택 가능한 국가** ({len(available)}개 남음 / 전체 {len(all_countries)}개, {taken_count}개 선택됨)\n"
+    ]
+    for i, country in enumerate(available, 1):
+        lines.append(f"`{i}.` {country}")
+
+    message = "\n".join(lines)
+    if len(message) > 2000:
+        message = message[:1990] + "\n..."
+
+    await interaction.response.send_message(message)
 
 
 @bot.tree.command(name="목록", description="참여한 멤버 목록을 확인합니다. (관리자 전용)")
@@ -149,7 +281,10 @@ async def 목록(interaction: discord.Interaction):
     await interaction.response.send_message(message, ephemeral=True)
 
 
-@bot.tree.command(name="역할일괄지급", description="JSON에 저장된 모든 멤버에게 역할을 지급합니다. (관리자 전용)")
+@bot.tree.command(
+    name="역할일괄지급",
+    description="JSON에 저장된 모든 멤버에게 역할을 지급합니다. (관리자 전용)",
+)
 @app_commands.checks.has_permissions(administrator=True)
 async def 역할일괄지급(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -182,8 +317,7 @@ async def 역할일괄지급(interaction: discord.Interaction):
             failed += 1
 
     await interaction.followup.send(
-        f"✅ 일괄 지급 완료!\n성공: {success}명 / 실패: {failed}명",
-        ephemeral=True
+        f"✅ 일괄 지급 완료!\n성공: {success}명 / 실패: {failed}명", ephemeral=True
     )
 
 
@@ -204,8 +338,9 @@ async def 제거(interaction: discord.Interaction, 유저id: str):
     print(f"[제거] {info['display_name']} ({유저id}) 목록에서 제거됨")
 
     await interaction.response.send_message(
-        f"🗑️ **{info['display_name']}** (`{유저id}`) 님이 목록에서 제거되었습니다.",
-        ephemeral=True
+        f"🗑️ **{info['display_name']}** (`{유저id}`) 님이 목록에서 제거되었습니다. "
+        f"(국가 **{info.get('국가', '미입력')}** 반환됨)",
+        ephemeral=True,
     )
 
 
@@ -223,8 +358,8 @@ async def 일괄제거(interaction: discord.Interaction):
     print(f"[일괄제거] 총 {count}명 목록에서 제거됨")
 
     await interaction.response.send_message(
-        f"🗑️ 총 **{count}명** 의 멤버가 목록에서 제거되었습니다.",
-        ephemeral=True
+        f"🗑️ 총 **{count}명** 의 멤버가 목록에서 제거되었습니다. (모든 국가 반환됨)",
+        ephemeral=True,
     )
 
 
@@ -234,7 +369,9 @@ async def 일괄제거(interaction: discord.Interaction):
 @일괄제거.error
 async def permission_error(interaction: discord.Interaction, error):
     if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message("❌ 관리자만 사용할 수 있는 명령어입니다.", ephemeral=True)
+        await interaction.response.send_message(
+            "❌ 관리자만 사용할 수 있는 명령어입니다.", ephemeral=True
+        )
 
 
 if __name__ == "__main__":
