@@ -1,0 +1,16 @@
+{
+  "welcome": {
+    "channel_id": 1492557560404901888,
+    "title": "서버에 오신것을 환영합니다!",
+    "message": "{user}님이 입장하셨습니다. 현재 서버 {count}명!",
+    "footer": "{server}",
+    "color": "초록"
+  },
+  "leave": {
+    "channel_id": 1492557560404901888,
+    "title": "안녕히가세요!",
+    "message": "{username}님이 서버를 떠났습니다.\n다음에 다시 만나요!",
+    "footer": "{server}",
+    "color": "파랑"
+  }
+}
