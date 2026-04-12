@@ -8,12 +8,15 @@ from datetime import datetime
 TOKEN = os.environ.get("DISCORD_TOKEN")
 GUILD_ID = int(os.environ.get("DISCORD_GUILD_ID", "0"))
 ROLE_ID = int(os.environ.get("ROLE_ID", "0"))
+VERIFY_ROLE_ID = int(os.environ.get("VERIFY_ROLE_ID", "0"))
 
 DATA_FILE = "members.json"
 COUNTRIES_FILE = "countries.json"
+VERIFY_CONFIG_FILE = "verify_config.json"
 
 intents = discord.Intents.default()
 intents.members = True
+intents.reactions = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -74,6 +77,18 @@ def get_available_by_category():
         if available:
             result[cat] = available
     return result
+
+
+def load_verify_config():
+    if not os.path.exists(VERIFY_CONFIG_FILE):
+        return {}
+    with open(VERIFY_CONFIG_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_verify_config(data):
+    with open(VERIFY_CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 # ── 모달: 닉네임 + 플레이타임 ────────────────────────────────
@@ -434,6 +449,68 @@ async def on_ready():
         print(f"명령어 동기화 오류: {e}")
 
 
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if payload.user_id == bot.user.id:
+        return
+
+    config = load_verify_config()
+    if not config:
+        return
+
+    if payload.message_id != config.get("message_id"):
+        return
+    if str(payload.emoji) != config.get("emoji"):
+        return
+
+    guild = bot.get_guild(payload.guild_id)
+    if guild is None:
+        return
+
+    role = guild.get_role(VERIFY_ROLE_ID)
+    if role is None:
+        return
+
+    member = guild.get_member(payload.user_id)
+    if member is None:
+        return
+
+    if role not in member.roles:
+        await member.add_roles(role, reason="이모지 인증")
+        print(f"[인증] {member.name} ({member.id}) 인증 역할 지급")
+
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    if payload.user_id == bot.user.id:
+        return
+
+    config = load_verify_config()
+    if not config:
+        return
+
+    if payload.message_id != config.get("message_id"):
+        return
+    if str(payload.emoji) != config.get("emoji"):
+        return
+
+    guild = bot.get_guild(payload.guild_id)
+    if guild is None:
+        return
+
+    role = guild.get_role(VERIFY_ROLE_ID)
+    if role is None:
+        return
+
+    member = guild.get_member(payload.user_id)
+    if member is None:
+        return
+
+    if role in member.roles:
+        await member.remove_roles(role, reason="이모지 인증 취소")
+        print(f"[인증취소] {member.name} ({member.id}) 인증 역할 제거")
+
+
 # ── 슬래시 명령어 ─────────────────────────────────────────────
 
 
@@ -617,6 +694,44 @@ async def 일괄제거(interaction: discord.Interaction):
     )
 
 
+@bot.tree.command(name="인증설정", description="이모지 인증 메시지를 이 채널에 전송합니다. (관리자 전용)")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(
+    이모지="인증에 사용할 이모지 (기본값: ✅)",
+    제목="인증 메시지 제목 (기본값: 서버 인증)",
+    설명="인증 메시지 본문 (기본값: 아래 이모지를 클릭하여 인증하세요.)",
+)
+async def 인증설정(
+    interaction: discord.Interaction,
+    이모지: str = "✅",
+    제목: str = "서버 인증",
+    설명: str = "아래 이모지를 클릭하여 인증하세요.",
+):
+    if VERIFY_ROLE_ID == 0:
+        await interaction.response.send_message(
+            "❌ VERIFY_ROLE_ID 환경변수가 설정되지 않았습니다.", ephemeral=True
+        )
+        return
+
+    embed = discord.Embed(
+        title=f"🔐 {제목}",
+        description=f"{설명}\n\n{이모지} 이모지를 눌러 **인증**하세요.",
+        color=discord.Color.green(),
+    )
+    embed.set_footer(text="반응을 취소하면 인증이 해제됩니다.")
+
+    await interaction.response.send_message("✅ 인증 메시지를 전송했습니다.", ephemeral=True)
+    msg = await interaction.channel.send(embed=embed)
+    await msg.add_reaction(이모지)
+
+    save_verify_config({
+        "channel_id": interaction.channel.id,
+        "message_id": msg.id,
+        "emoji": 이모지,
+    })
+    print(f"[인증설정] 채널={interaction.channel.id} 메시지={msg.id} 이모지={이모지}")
+
+
 @bot.tree.command(name="수정", description="참여 정보를 수정합니다. 관리자는 유저ID를 지정할 수 있습니다.")
 @app_commands.describe(유저id="수정할 유저의 ID (관리자 전용, 생략 시 본인)")
 async def 수정(interaction: discord.Interaction, 유저id: str = None):
@@ -656,6 +771,7 @@ async def 수정(interaction: discord.Interaction, 유저id: str = None):
 @역할일괄지급.error
 @제거.error
 @일괄제거.error
+@인증설정.error
 async def permission_error(interaction: discord.Interaction, error):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(

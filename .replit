@@ -27,3 +27,8 @@ args = "python bot.py"
 
 [workflows.workflow.metadata]
 outputType = "console"
+
+[userenv]
+
+[userenv.shared]
+VERIFY_ROLE_ID = "1279009654738911242"
