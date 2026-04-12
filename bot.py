@@ -36,7 +36,24 @@ def load_countries():
     if not os.path.exists(COUNTRIES_FILE):
         return []
     with open(COUNTRIES_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    if isinstance(data, list):
+        return data
+    # 카테고리 딕셔너리인 경우 평탄화
+    result = []
+    for countries in data.values():
+        result.extend(countries)
+    return result
+
+
+def load_countries_by_category():
+    if not os.path.exists(COUNTRIES_FILE):
+        return {}
+    with open(COUNTRIES_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, list):
+        return {"전체": data}
+    return data
 
 
 def get_available_countries():
@@ -44,6 +61,18 @@ def get_available_countries():
     members = load_members()
     taken = {info.get("국가") for info in members.values()}
     return [c for c in all_countries if c not in taken]
+
+
+def get_available_by_category():
+    categories = load_countries_by_category()
+    members = load_members()
+    taken = {info.get("국가") for info in members.values()}
+    result = {}
+    for cat, countries in categories.items():
+        available = [c for c in countries if c not in taken]
+        if available:
+            result[cat] = available
+    return result
 
 
 # ── 모달: 닉네임 + 플레이타임 ────────────────────────────────
@@ -223,11 +252,12 @@ async def 참여(interaction: discord.Interaction):
     await interaction.response.send_message(view._header(), view=view, ephemeral=True)
 
 
-@bot.tree.command(name="남은국가", description="아직 선택되지 않은 국가 목록을 보여줍니다.")
+@bot.tree.command(name="남은국가", description="아직 선택되지 않은 국가 목록을 카테고리별로 보여줍니다.")
 async def 남은국가(interaction: discord.Interaction):
     all_countries = load_countries()
-    available = get_available_countries()
-    taken_count = len(all_countries) - len(available)
+    available_by_cat = get_available_by_category()
+    available_total = sum(len(v) for v in available_by_cat.values())
+    taken_count = len(all_countries) - available_total
 
     if not all_countries:
         await interaction.response.send_message(
@@ -235,17 +265,18 @@ async def 남은국가(interaction: discord.Interaction):
         )
         return
 
-    if not available:
+    if not available_by_cat:
         await interaction.response.send_message(
             f"🌍 모든 국가가 선택되었습니다! (총 {len(all_countries)}개)", ephemeral=True
         )
         return
 
     lines = [
-        f"🌍 **선택 가능한 국가** ({len(available)}개 남음 / 전체 {len(all_countries)}개, {taken_count}개 선택됨)\n"
+        f"🌍 **선택 가능한 국가** ({available_total}개 남음 / 전체 {len(all_countries)}개, {taken_count}개 선택됨)\n"
     ]
-    for i, country in enumerate(available, 1):
-        lines.append(f"`{i}.` {country}")
+    for cat, countries in available_by_cat.items():
+        lines.append(f"**[ {cat} ]**")
+        lines.append("  " + "  /  ".join(countries))
 
     message = "\n".join(lines)
     if len(message) > 2000:
