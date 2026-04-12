@@ -13,6 +13,17 @@ VERIFY_ROLE_ID = int(os.environ.get("VERIFY_ROLE_ID", "0"))
 DATA_FILE = "members.json"
 COUNTRIES_FILE = "countries.json"
 VERIFY_CONFIG_FILE = "verify_config.json"
+WELCOME_CONFIG_FILE = "welcome_config.json"
+
+COLOR_MAP = {
+    "초록": discord.Color.green(),
+    "빨강": discord.Color.red(),
+    "파랑": discord.Color.blue(),
+    "금색": discord.Color.gold(),
+    "보라": discord.Color.purple(),
+    "주황": discord.Color.orange(),
+    "기본": discord.Color.blurple(),
+}
 
 intents = discord.Intents.default()
 intents.members = True
@@ -89,6 +100,114 @@ def load_verify_config():
 def save_verify_config(data):
     with open(VERIFY_CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def load_welcome_config():
+    if not os.path.exists(WELCOME_CONFIG_FILE):
+        return {}
+    with open(WELCOME_CONFIG_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_welcome_config(data):
+    with open(WELCOME_CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def format_message(template: str, member: discord.Member) -> str:
+    return (
+        template
+        .replace("{user}", member.mention)
+        .replace("{username}", member.display_name)
+        .replace("{server}", member.guild.name)
+        .replace("{count}", str(member.guild.member_count))
+    )
+
+
+def build_embed(cfg: dict, member: discord.Member) -> discord.Embed:
+    color = COLOR_MAP.get(cfg.get("color", "기본"), discord.Color.blurple())
+    embed = discord.Embed(
+        title=format_message(cfg.get("title", ""), member),
+        description=format_message(cfg.get("message", ""), member),
+        color=color,
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.set_footer(text=format_message(cfg.get("footer", "{server}"), member))
+    return embed
+
+
+# ── 입장/퇴장 설정 모달 ──────────────────────────────────────
+
+
+class WelcomeSetupModal(discord.ui.Modal):
+    def __init__(self, kind: str, channel_id: int, existing: dict):
+        label = "입장" if kind == "welcome" else "퇴장"
+        super().__init__(title=f"{label} 메시지 설정")
+        self.kind = kind
+        self.channel_id = channel_id
+
+        self.title_input = discord.ui.TextInput(
+            label="제목",
+            default=existing.get("title", "환영합니다!" if kind == "welcome" else "퇴장"),
+            required=True,
+            max_length=100,
+        )
+        self.message_input = discord.ui.TextInput(
+            label="본문 ({user} {username} {server} {count} 사용 가능)",
+            style=discord.TextStyle.paragraph,
+            default=existing.get(
+                "message",
+                "{user}님이 입장하셨습니다. 현재 {count}명!" if kind == "welcome"
+                else "{username}님이 서버를 떠났습니다.",
+            ),
+            required=True,
+            max_length=500,
+        )
+        self.footer_input = discord.ui.TextInput(
+            label="푸터 (선택)",
+            default=existing.get("footer", "{server}"),
+            required=False,
+            max_length=100,
+        )
+        self.color_input = discord.ui.TextInput(
+            label="색상 (초록/빨강/파랑/금색/보라/주황/기본)",
+            default=existing.get("color", "초록" if kind == "welcome" else "빨강"),
+            required=False,
+            max_length=10,
+        )
+        self.add_item(self.title_input)
+        self.add_item(self.message_input)
+        self.add_item(self.footer_input)
+        self.add_item(self.color_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        color = self.color_input.value.strip() if self.color_input.value else "기본"
+        if color not in COLOR_MAP:
+            color = "기본"
+
+        cfg = load_welcome_config()
+        cfg[self.kind] = {
+            "channel_id": self.channel_id,
+            "title": self.title_input.value,
+            "message": self.message_input.value,
+            "footer": self.footer_input.value or "{server}",
+            "color": color,
+        }
+        save_welcome_config(cfg)
+
+        kind_label = "입장" if self.kind == "welcome" else "퇴장"
+        channel = interaction.guild.get_channel(self.channel_id)
+        ch_mention = channel.mention if channel else f"(ID: {self.channel_id})"
+
+        await interaction.response.send_message(
+            f"✅ **{kind_label} 메시지** 설정 완료!\n"
+            f"> 📢 채널: {ch_mention}\n"
+            f"> 📌 제목: {self.title_input.value}\n"
+            f"> 💬 본문: {self.message_input.value[:80]}{'...' if len(self.message_input.value) > 80 else ''}\n"
+            f"> 🎨 색상: {color}",
+            ephemeral=True,
+        )
+        print(f"[{kind_label}메시지설정] 채널={self.channel_id} 색상={color}")
 
 
 # ── 모달: 닉네임 + 플레이타임 ────────────────────────────────
@@ -450,6 +569,32 @@ async def on_ready():
 
 
 @bot.event
+async def on_member_join(member: discord.Member):
+    cfg = load_welcome_config().get("welcome")
+    if not cfg:
+        return
+    channel = member.guild.get_channel(cfg["channel_id"])
+    if channel is None:
+        return
+    embed = build_embed(cfg, member)
+    await channel.send(embed=embed)
+    print(f"[입장] {member.name} ({member.id})")
+
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    cfg = load_welcome_config().get("leave")
+    if not cfg:
+        return
+    channel = member.guild.get_channel(cfg["channel_id"])
+    if channel is None:
+        return
+    embed = build_embed(cfg, member)
+    await channel.send(embed=embed)
+    print(f"[퇴장] {member.name} ({member.id})")
+
+
+@bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if payload.user_id == bot.user.id:
         return
@@ -694,6 +839,28 @@ async def 일괄제거(interaction: discord.Interaction):
     )
 
 
+@bot.tree.command(name="입장메시지설정", description="멤버 입장 시 전송할 메시지를 설정합니다. (관리자 전용)")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(채널="입장 메시지를 보낼 채널")
+async def 입장메시지설정(interaction: discord.Interaction, 채널: discord.TextChannel):
+    cfg = load_welcome_config()
+    existing = cfg.get("welcome", {})
+    existing["channel_id"] = 채널.id
+    modal = WelcomeSetupModal("welcome", 채널.id, existing)
+    await interaction.response.send_modal(modal)
+
+
+@bot.tree.command(name="퇴장메시지설정", description="멤버 퇴장 시 전송할 메시지를 설정합니다. (관리자 전용)")
+@app_commands.checks.has_permissions(administrator=True)
+@app_commands.describe(채널="퇴장 메시지를 보낼 채널")
+async def 퇴장메시지설정(interaction: discord.Interaction, 채널: discord.TextChannel):
+    cfg = load_welcome_config()
+    existing = cfg.get("leave", {})
+    existing["channel_id"] = 채널.id
+    modal = WelcomeSetupModal("leave", 채널.id, existing)
+    await interaction.response.send_modal(modal)
+
+
 @bot.tree.command(name="인증설정", description="이모지 인증 메시지를 이 채널에 전송합니다. (관리자 전용)")
 @app_commands.checks.has_permissions(administrator=True)
 @app_commands.describe(
@@ -772,6 +939,8 @@ async def 수정(interaction: discord.Interaction, 유저id: str = None):
 @제거.error
 @일괄제거.error
 @인증설정.error
+@입장메시지설정.error
+@퇴장메시지설정.error
 async def permission_error(interaction: discord.Interaction, error):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message(
