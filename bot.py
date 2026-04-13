@@ -4,8 +4,11 @@ from discord.ext import commands
 import json
 import os
 from datetime import datetime
+from dotenv import load_dotenv
 
-TOKEN = token_id
+load_dotenv()
+
+TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = 1279004325028302848
 ROLE_ID = 1279004669062021201
 VERIFY_ROLE_ID = 1279009654738911242
